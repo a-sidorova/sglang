@@ -4591,7 +4591,12 @@ def _is_arch_support_pdl() -> bool:
     The vLLM adapter reads this off its platform layer. This module stays free of both engines'
     imports so the kernels can be extracted and tested on their own, so the same predicate is
     expressed in torch directly.
+
+    PDL is CUDA-only: ROCm reports the gfx version as the capability (MI355X -> (9, 5)), and the
+    kernels' ``gdc_*`` calls lower to PTX ``griddepcontrol.*``, which the AMDGPU assembler rejects.
     """
+    if torch.version.cuda is None:
+        return False
     try:
         device = torch.cuda.current_device()
         major, _ = torch.cuda.get_device_capability(device)
