@@ -160,10 +160,12 @@ from sglang.srt.runtime_context import (
     get_spec,
 )
 from sglang.srt.sampling.custom_logit_processor import (
+    SolarOpen2LogitProcessor,
     supports_sampling_mask,
     validate_custom_logit_processor,
 )
 from sglang.srt.sampling.sampling_params import SamplingParams
+from sglang.srt.sampling.solar_open2 import SolarOpen2Config
 from sglang.srt.sampling.watermarking.core import (
     redact_watermark_command_line,
     redact_watermark_secrets,
@@ -584,6 +586,14 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         self.model_path = get_model().model_path
         self.served_model_name = get_serving().served_model_name
         self.model_config = model_config_class.from_server_args(server_args)
+        self.default_custom_logit_processor = (
+            SolarOpen2LogitProcessor.to_str()
+            if get_exec().features.enable_custom_logit_processor
+            and self.model_config.hf_config.model_type in ("solar_open2", "solar_open3")
+            else None
+        )
+        if self.default_custom_logit_processor:
+            SolarOpen2Config.from_tokenizer()
         self.is_generation = self.model_config.is_generation
         self.context_len = self.model_config.context_len
         self.image_token_id = self.model_config.image_token_id
@@ -1398,6 +1408,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
         # Validate generation-specific fields
         if isinstance(obj, GenerateReqInput):
+            obj.custom_logit_processor = obj.custom_logit_processor or getattr(
+                self, "default_custom_logit_processor", None
+            )
             self._validate_token_ids_logprob(obj)
             requested_hidden_mode = get_request_return_hidden_states_mode(
                 obj.return_hidden_states

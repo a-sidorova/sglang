@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import torch
@@ -131,6 +132,21 @@ def _cutedsl_qk_sum_squares(x, BK: tl.constexpr):
         odd_sum = tl.fma(odd1, odd1, odd_sum)
     lane_sum = even_sum + odd_sum
     return tl.sum(lane_sum, axis=0)
+
+
+def _kda_decode_launch_config(value_dim: int):
+    bv, warps, stages = min(triton.next_power_of_2(value_dim), 32), 1, 3
+    values = []
+    for suffix, default in (("BV", bv), ("WARPS", warps), ("STAGES", stages)):
+        name = f"SGLANG_SOLAR_OPEN2_KDA_DECODE_{suffix}"
+        raw = os.environ.get(name)
+        value = default if raw is None else int(raw)
+        if value <= 0 or (suffix != "STAGES" and value & (value - 1)):
+            raise ValueError(f"{name} must be a positive power of two")
+        if suffix == "WARPS" and value > 32:
+            raise ValueError(f"{name} must be at most 32")
+        values.append(value)
+    return min(triton.next_power_of_2(value_dim), values[0]), *values[1:]
 
 
 @triton.jit(do_not_specialize=["T"])
@@ -610,10 +626,12 @@ def fused_sigmoid_gating_delta_rule_update(
         target_verify=target_verify,
         cache_steps=cache_steps,
     )
+    num_stages = 3
+    if is_kda and not disable_state_update and intermediate_states_buffer is None:
+        BV, num_warps, num_stages = _kda_decode_launch_config(V)
     BK = triton.next_power_of_2(K)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
-    num_stages = 3
 
     if scale is None:
         scale = k.shape[-1] ** -0.5

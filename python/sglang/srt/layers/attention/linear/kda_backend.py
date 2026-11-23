@@ -793,6 +793,30 @@ class KDAAttnBackend(MambaAttnBackendBase):
         replayssm_k = layer_cache.replayssm_k
         replayssm_g = layer_cache.replayssm_g
 
+        if (
+            replayssm_d is None
+            and getattr(layer, "_solar_fused_decode_args", None) is not None
+            and getattr(layer, "_solar_onorm_gate", None) is not None
+        ):
+            from sglang.kernels.ops.attention import solar_open2_kda
+
+            gate = layer._solar_onorm_gate
+            if solar_open2_kda.covered(
+                mixed_qkv, a, b, conv_states, ssm_states, cache_indices, gate
+            ):
+                output = solar_open2_kda.run(
+                    layer, mixed_qkv, a, b, conv_states, ssm_states, cache_indices, gate
+                )
+                layer._solar_onorm_consumed = True
+                self._track_mamba_state_decode(
+                    forward_batch,
+                    conv_states,
+                    ssm_states,
+                    cache_indices,
+                    layer.layer_id,
+                )
+                return output
+
         deferred_f_b = bool(getattr(layer, "_k3_deferred_f_b", False))
         if replayssm_d is None and deferred_f_b and is_gfx95_supported():
             fused_static = getattr(layer, "_k3_hip_fused_decode_args", None)

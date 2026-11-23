@@ -242,3 +242,12 @@ class DeepseekOCRNoRepeatNGramLogitProcessor(CustomLogitProcessor):
             logits[batch_idx, indices] = -float("inf")
 
         return logits
+
+
+def __getattr__(name: str):
+    # Keep imports and serialized references from before the module split valid.
+    if name == "SolarOpen2LogitProcessor":
+        from sglang.srt.sampling.solar_open2_processor import SolarOpen2LogitProcessor
+
+        return SolarOpen2LogitProcessor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

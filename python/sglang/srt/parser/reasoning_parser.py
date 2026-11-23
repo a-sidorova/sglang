@@ -2275,6 +2275,8 @@ class ReasoningParser:
         "poolside_v1": _PoolsideV1Detector,
         "qwen3": Qwen3Detector,
         "qwen3-thinking": Qwen3Detector,
+        "solar_open2": "sglang.srt.parser.solar_open2_reasoning_detector.SolarOpen2Detector",
+        "solar_open3": "sglang.srt.parser.solar_open2_reasoning_detector.SolarOpen2Detector",
         "minimax": Qwen3Detector,
         "minimax-append-think": MiniMaxAppendThinkDetector,
         "minimax-m3": MiniMaxM3Detector,
@@ -2414,3 +2416,12 @@ class ReasoningParser:
         the stream ends."""
         ret = self.detector.finish()
         return ret.reasoning_text, ret.normal_text
+
+
+def __getattr__(name: str):
+    # Keep imports and serialized references from before the module split valid.
+    if name == "SolarOpen2Detector":
+        from sglang.srt.parser.solar_open2_reasoning_detector import SolarOpen2Detector
+
+        return SolarOpen2Detector
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

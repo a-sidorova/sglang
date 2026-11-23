@@ -134,6 +134,7 @@ _is_cpu_amx_available = cpu_has_amx_support()
 _is_xpu = is_xpu()
 _is_npu = is_npu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_solar_open2_triton_topk = get_bool_env_var("SGLANG_SOLAR_OPEN2_TRITON_TOPK")
 _is_musa = is_musa()
 
 # Epsilon added to the top-k weight sum before renormalization, matching the
@@ -1788,6 +1789,40 @@ def biased_grouped_topk_gpu(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     num_tokens = gating_output.shape[0]
     num_experts = gating_output.shape[1]
+    if _solar_open2_triton_topk and num_fused_shared_experts == 0:
+        from sglang.kernels.ops.moe import solar_open2_grouped_topk
+
+        topk_ids = torch.empty(
+            (num_tokens, topk), dtype=torch.int32, device=gating_output.device
+        )
+        if (
+            num_expert_group is not None
+            and topk_group is not None
+            and correction_bias.shape == (num_experts,)
+            and correction_bias.is_contiguous()
+            and correction_bias.device == gating_output.device
+            and solar_open2_grouped_topk.supports(
+                gating_output, topk_ids, num_expert_group, topk_group
+            )
+        ):
+            topk_weights = torch.empty_like(topk_ids, dtype=torch.float32)
+            scale = (
+                routed_scaling_factor
+                if (_use_aiter or apply_routed_scaling_factor_on_output)
+                and routed_scaling_factor is not None
+                else 1.0
+            )
+            solar_open2_grouped_topk.solar_open2_biased_grouped_topk(
+                gating_output,
+                correction_bias,
+                topk_weights,
+                topk_ids,
+                num_expert_group,
+                topk_group,
+                renormalize,
+                scale,
+            )
+            return topk_weights, topk_ids
     experts_per_group = (
         num_experts // num_expert_group if num_expert_group else num_experts
     )

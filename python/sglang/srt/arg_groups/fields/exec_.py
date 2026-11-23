@@ -67,7 +67,11 @@ class ExecFeatures(msgspec.Struct):
     ] = False
     enable_custom_logit_processor: A[
         bool,
-        "Enable users to pass custom logit processors to the server (disabled by default for security)",
+        (
+            "Enable users to pass custom logit processors to the server "
+            "(disabled by default for security). Solar Open2 models also apply "
+            "their built-in processor to requests without an explicit processor."
+        ),
     ] = False
     enable_watermark: A[
         bool,

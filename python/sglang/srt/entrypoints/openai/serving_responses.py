@@ -60,6 +60,7 @@ from sglang.srt.entrypoints.harmony_utils import (
     parse_response_input,
     render_for_completion,
 )
+from sglang.srt.entrypoints.openai import solar_request_policy as solar_policy
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ChatCompletionRequest,
@@ -696,6 +697,9 @@ class OpenAIServingResponses(OpenAIServingChat):
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
         processed_messages = self._process_messages(chat_request, is_multimodal)
         request.custom_params = chat_request.custom_params
+        solar_policy.carry_prompt_state(
+            request, processed_messages, self.reasoning_parser
+        )
         # ``_process_messages`` merges server defaults into the temporary Chat
         # request before rendering. Response parsing happens later from the
         # original request, so carry over the exact template kwargs that selected
@@ -980,6 +984,9 @@ class OpenAIServingResponses(OpenAIServingChat):
     def _is_thinking_enabled_for_request(self, request: ResponsesRequest) -> bool:
         if not self.reasoning_parser:
             return False
+        reasoning = solar_policy.reasoning_enabled(request, self.reasoning_parser)
+        if reasoning is not None:
+            return reasoning
         # an explicit toggle wins; the key differs by family (enable_thinking vs thinking).
         ctk = request.chat_template_kwargs or {}
         thinking_toggles = (ctk.get("enable_thinking"), ctk.get("thinking"))

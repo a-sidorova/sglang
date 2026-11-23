@@ -60,6 +60,17 @@ del _mod, _fn
 
 register_kernel(
     KernelSpec(
+        op="attention.solar_open3_page_table",
+        backend=KernelBackend.TRITON,
+        target="sglang.kernels.ops.attention.solar_open3.page_table:solar_open3_page_table",
+        capabilities=frozenset({CapabilityRequirement.cuda()}),
+        format_signature=FormatSignature(supported_dtypes=("int32", "int64")),
+        description="SolarOpen3 full-width page gather, floor division and verify row repeat.",
+    )
+)
+
+register_kernel(
+    KernelSpec(
         op="attention.kda_qwen38_qsa_sm121",
         backend=KernelBackend.TRITON,
         target=("sglang.kernels.kda_kernels.qwen38_qsa_sm121:qwen38_qsa_sm121"),

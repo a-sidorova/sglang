@@ -46,6 +46,7 @@ from sglang.srt.entrypoints.openai import (
     encoding_dsv32,
     encoding_dsv41,
 )
+from sglang.srt.entrypoints.openai import solar_request_policy as solar_policy
 from sglang.srt.entrypoints.openai.parallel_prompt_encode import (
     parallel_prompt_encode,
 )
@@ -1359,6 +1360,10 @@ class OpenAIServingChat(OpenAIServingBase):
             if effort is not None and request.reasoning_effort is None:
                 request.reasoning_effort = effort
 
+        solar_policy.prepare_request(
+            request, self.reasoning_parser, self.tool_call_parser
+        )
+
         normalize_hunyuan_reasoning_effort(
             request, self.reasoning_parser, self.template_manager.reasoning_config
         )
@@ -1485,6 +1490,9 @@ class OpenAIServingChat(OpenAIServingBase):
             if tool_call_stop not in result.stop:
                 result.stop.append(tool_call_stop)
 
+        thinking_mode = solar_policy.observe_prompt(
+            self, request, result, thinking_mode
+        )
         result.tool_call_constraint = tool_call_constraint
         result.require_reasoning = thinking_mode
         result.skip_special_tokens = request.skip_special_tokens
@@ -2835,7 +2843,7 @@ class OpenAIServingChat(OpenAIServingBase):
         Some reasoning parsers rely on special-token delimiters that would be
         removed during detokenization when ``skip_special_tokens=True``.
         """
-        if self.reasoning_parser == "apertus2509":
+        if self.reasoning_parser in ("apertus2509", "solar_open2", "solar_open3"):
             request.skip_special_tokens = False
         if self.reasoning_parser == "kimi_k3" or self.chat_encoding_spec == "kimi_k3":
             request.skip_special_tokens = False
@@ -2852,10 +2860,13 @@ class OpenAIServingChat(OpenAIServingBase):
             request.skip_special_tokens = False
 
     def supports_native_reasoning_history(self) -> bool:
-        """Whether the chat encoder takes history as ``reasoning_content`` rather
-        than via :meth:`wrap_reasoning_history`; see
+        """Whether the chat encoder/template takes history as ``reasoning_content``
+        rather than via :meth:`wrap_reasoning_history`; see
         :func:`chat_encoding.spec_owns_reasoning_history` for why.
         """
+        # Solar's HF template frames reasoning_content with its own think tags.
+        if self.reasoning_parser in ("solar_open2", "solar_open3"):
+            return True
         return chat_encoding.spec_owns_reasoning_history(self.chat_encoding_spec)
 
     def wrap_reasoning_history(self, reasoning_text: str) -> str:
@@ -2989,6 +3000,9 @@ class OpenAIServingChat(OpenAIServingBase):
         if not self.reasoning_parser:
             return False
 
+        reasoning = solar_policy.reasoning_enabled(request, self.reasoning_parser)
+        if reasoning is not None:
+            return reasoning
         if self.reasoning_parser == "iquest_q1":
             return IQuestQ1ReasoningDetector.thinking_enabled(
                 request.chat_template_kwargs or {}
