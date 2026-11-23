@@ -1872,7 +1872,15 @@ def _clamp_moe(moe: SolarOpen3MoE, config) -> None:
     ``MoeRunnerConfig`` FusedMoE shares with its runner."""
     routed = _bound(config, "swiglu_limit")
     if routed is not None:
-        runner = moe.experts.quant_method.runner
+        from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
+            CompressedTensorsFusedMoEMethod,
+        )
+
+        if isinstance(moe.experts.quant_method, CompressedTensorsFusedMoEMethod):
+            # compressed-tensors delegates create_moe_runner to the layer's scheme.
+            runner = moe.experts.scheme.runner
+        else:
+            runner = moe.experts.quant_method.runner
         if not runner.runner_backend.is_triton():
             raise NotImplementedError(
                 f"solar_open3 SGLang applies swiglu_limit={routed} only through the triton MoE runner "
