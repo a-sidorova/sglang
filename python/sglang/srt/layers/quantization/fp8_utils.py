@@ -2228,13 +2228,21 @@ def _apply_fallback_scaled_mm(
     return output.to(dtype=input_dtype)
 
 
-def use_aiter_bpreshuffle_gemm(output_size: int) -> bool:
+def use_aiter_bpreshuffle_gemm(output_size: int, input_size: int) -> bool:
     # aiter's CK gemm_a8w8_bpreshuffle instances are GemmSpecialization::Default
     # (pre-shuffled weights are never N-padded) with NPerBlock=64, so any N that
     # is not a multiple of 64 raises "This GEMM is not supported!". Measured on
     # gfx950 for M=16384/N=32/K=4096, torch._scaled_mm rowwise runs that shape in
     # 14us against 90us for the cktile instance that does accept it.
-    return _use_aiter and output_size % 64 == 0
+    # The default CK dispatch also requires K > 192 and K divisible by 64.
+    # KDA's low-rank f_b/g_b projections have K=128. Keep those weights in
+    # their original layout so the runtime can safely use torch._scaled_mm.
+    return (
+        _use_aiter
+        and output_size % 64 == 0
+        and input_size > 192
+        and input_size % 64 == 0
+    )
 
 
 def apply_fp8_linear_bmm_flashinfer(
@@ -2394,6 +2402,21 @@ def apply_fp8_linear(
                         input_2d, group_size=input_2d.shape[1]
                     )
 
+    # torch._scaled_mm requires N to be divisible by 16. Small projections
+    # such as Solar Open2's 24-head beta gate (and its TP shards) do not meet
+    # that contract. Their weights are not AITER-preshuffled (N % 64 != 0),
+    # so the masked Triton GEMM can consume the original FP8 layout and scales.
+    if weight.shape[1] % 16 != 0:
+        output = triton_scaled_mm(
+            qinput.view(-1, qinput.shape[-1]),
+            weight,
+            x_scale,
+            weight_scale,
+            output_dtype,
+            bias,
+        )
+        return _process_scaled_mm_output(output, input_2d.shape, output_shape)
+
     if channelwise_cutlass:
         # A tuned config exists only for shapes where tuned Triton beat the
         # CUTLASS dispatch on this GPU; otherwise this is None and the backend
@@ -2457,7 +2480,7 @@ def apply_fp8_linear(
         # Must agree with the load-time predicate that decides whether the
         # weight was pre-shuffled; an unshuffled weight through the aiter path
         # (or a shuffled one through torch._scaled_mm) silently returns garbage.
-        if use_aiter_bpreshuffle_gemm(weight.shape[1]):
+        if use_aiter_bpreshuffle_gemm(weight.shape[1], weight.shape[0]):
             # gemm_a8w8_bpreshuffle(XQ, WQ, x_scale, w_scale, dtype)
             # XQ -> input tensor, shape = (m, k)
             # WQ -> weight tensor, shape = (n, k), with preshuffe get better perf

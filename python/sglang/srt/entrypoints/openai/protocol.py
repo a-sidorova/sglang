@@ -71,6 +71,7 @@ try:
 except:
     StructuralTag = Any
 
+from sglang.srt.sampling.repetition_detection import RepetitionDetectionParams
 from sglang.utils import convert_json_schema_to_str
 
 logger = logging.getLogger(__name__)
@@ -387,6 +388,7 @@ class CompletionRequest(PDRoutingFields):
     regex: Optional[str] = None
     ebnf: Optional[str] = None
     repetition_penalty: float = 1.0
+    repetition_detection: Optional[RepetitionDetectionParams] = None
     stop_token_ids: Optional[List[int]] = None
     stop_regex: Optional[Union[str, List[str]]] = None
     no_stop_trim: bool = False
@@ -490,7 +492,9 @@ class CompletionResponseChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "content_filter", "abort"]] = None
+    finish_reason: Optional[
+        Literal["stop", "length", "content_filter", "abort", "repetition"]
+    ] = None
     matched_stop: Union[None, int, str] = None
     hidden_states: Optional[object] = None
     token_ids: Optional[List[int]] = None
@@ -530,7 +534,9 @@ class CompletionResponseStreamChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "content_filter", "abort"]] = None
+    finish_reason: Optional[
+        Literal["stop", "length", "content_filter", "abort", "repetition"]
+    ] = None
     matched_stop: Union[None, int, str] = None
     hidden_states: Optional[object] = None
     token_ids: Optional[List[int]] = None
@@ -946,6 +952,7 @@ class ChatCompletionRequest(PDRoutingFields):
     regex: Optional[str] = None
     ebnf: Optional[str] = None
     repetition_penalty: Optional[float] = None
+    repetition_detection: Optional[RepetitionDetectionParams] = None
     stop_token_ids: Optional[List[int]] = None
     stop_regex: Optional[Union[str, List[str]]] = None
     no_stop_trim: bool = False
@@ -1158,6 +1165,7 @@ class ChatCompletionRequest(PDRoutingFields):
             "presence_penalty": self.presence_penalty,
             "frequency_penalty": self.frequency_penalty,
             "repetition_penalty": get_param("repetition_penalty"),
+            "repetition_detection": self.repetition_detection,
             "regex": self.regex,
             "ebnf": self.ebnf,
             "n": self.n,
@@ -1246,7 +1254,13 @@ class ChatCompletionResponseChoice(BaseModel):
     logprobs: Optional[Union[LogProbs, ChoiceLogprobs]] = None
     finish_reason: Optional[
         Literal[
-            "stop", "length", "tool_calls", "content_filter", "function_call", "abort"
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "function_call",
+            "abort",
+            "repetition",
         ]
     ] = None
     matched_stop: Union[None, int, str] = None
@@ -1308,7 +1322,13 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     logprobs: Optional[Union[LogProbs, ChoiceLogprobs]] = None
     finish_reason: Optional[
         Literal[
-            "stop", "length", "tool_calls", "content_filter", "function_call", "abort"
+            "stop",
+            "length",
+            "tool_calls",
+            "content_filter",
+            "function_call",
+            "abort",
+            "repetition",
         ]
     ] = None
     matched_stop: Union[None, int, str] = None
@@ -1866,6 +1886,8 @@ class ResponsesRequest(PDRoutingFields):
 
     # Extra SGLang parameters
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    custom_logit_processor: Optional[str] = None
+    custom_params: Optional[Dict[str, Any]] = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{uuid.uuid4().hex}",
         description="The request_id related to this request. If the caller does not set it, a random uuid will be generated.",
@@ -2077,6 +2099,8 @@ class ResponsesRequest(PDRoutingFields):
             params["min_p"] = self.min_p
         if self.repetition_penalty is not None:
             params["repetition_penalty"] = self.repetition_penalty
+        if self.custom_params is not None:
+            params["custom_params"] = self.custom_params
 
         # Apply any additional default parameters
         for key, value in default_params.items():

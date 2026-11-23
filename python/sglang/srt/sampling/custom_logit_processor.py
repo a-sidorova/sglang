@@ -73,6 +73,17 @@ def supports_sampling_mask(serialized_processor: str) -> bool:
         return False
 
 
+def validate_custom_logit_processor(
+    serialized_processor: str, custom_params: Optional[Dict[str, Any]]
+) -> None:
+    """Validate request options without constructing the sampling processor."""
+    validate_params = getattr(
+        _cache_from_str(serialized_processor), "validate_params", None
+    )
+    if validate_params is not None:
+        validate_params({} if custom_params is None else custom_params)
+
+
 def _open_thinking_start(ids: list[int], start_id: int, end_id: int) -> int:
     """Return the index of the start token of the currently open thinking block, or -1."""
     for idx in reversed(range(len(ids))):

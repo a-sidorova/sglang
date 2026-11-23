@@ -113,7 +113,7 @@ class QuarkW8A8Fp8(QuarkLinearScheme):
                 return
             if self.per_token:
                 weight_scale = weight_scale.view(-1, 1)
-            if use_aiter_bpreshuffle_gemm(weight.shape[0]):
+            if use_aiter_bpreshuffle_gemm(weight.shape[0], weight.shape[1]):
                 layer.weight = Parameter(
                     shuffle_weight(weight, (16, 16)).t(), requires_grad=False
                 )

@@ -1089,7 +1089,9 @@ class Fp8LinearMethod(LinearMethodBase):
                     weight_scale = weight_scale.t().contiguous()
                     if _use_aiter and self.use_aiter_fp8_per_token:
                         self.use_per_token_if_dynamic = True
-                        if use_aiter_bpreshuffle_gemm(qweight.shape[0]):
+                        if use_aiter_bpreshuffle_gemm(
+                            qweight.shape[0], qweight.shape[1]
+                        ):
                             qweight = shuffle_weight(qweight.contiguous(), (16, 16))
                 else:
                     # per-tensor quantization
@@ -1151,7 +1153,7 @@ class Fp8LinearMethod(LinearMethodBase):
                                 weight=weight,
                                 weight_scale=weight_scale,
                             )
-                        if use_aiter_bpreshuffle_gemm(weight.shape[0]):
+                        if use_aiter_bpreshuffle_gemm(weight.shape[0], weight.shape[1]):
                             weight = shuffle_weight(weight.contiguous(), (16, 16))
                 else:
                     # Dequant -> Quant with max scale so we can run per tensor.

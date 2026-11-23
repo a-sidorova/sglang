@@ -204,6 +204,7 @@ class SamplingParams(msgspec.Struct, kw_only=True, frozen=True):
     custom_params: Optional[Any] = None
     beam_width: Optional[int] = None
     watermark: Optional[WatermarkRequestConfig] = None
+    repetition_detection: Optional[RepetitionDetectionParams] = None
 
     @classmethod
     def from_json_value(cls, value: Any) -> "SamplingParams":
@@ -230,6 +231,23 @@ class WatermarkRequestConfig(msgspec.Struct, kw_only=True, frozen=True):
     def to_json_value(self) -> Dict[str, Any]:
         """Encode to a JSON-ready value (json.dumps-compatible)."""
         return encode_WatermarkRequestConfig(self)
+
+
+class RepetitionDetectionParams(msgspec.Struct, kw_only=True, frozen=True):
+    """sglang.api.v1.RepetitionDetectionParams: JSON object (unknown keys rejected)."""
+
+    min_pattern_size: int = 0
+    max_pattern_size: int = 0
+    min_count: int = 0
+
+    @classmethod
+    def from_json_value(cls, value: Any) -> "RepetitionDetectionParams":
+        """Decode a parsed JSON value; raises JsonContractError on a contract violation."""
+        return decode_RepetitionDetectionParams(value)
+
+    def to_json_value(self) -> Dict[str, Any]:
+        """Encode to a JSON-ready value (json.dumps-compatible)."""
+        return encode_RepetitionDetectionParams(self)
 
 
 class GenerateRequest(msgspec.Struct, kw_only=True, frozen=True):
@@ -895,7 +913,7 @@ def encode_FinishReason(v: FinishReason) -> Any:
     raise TypeError(f"FinishReason: unsupported value {type(v).__name__}")
 
 
-_FIELDS_SamplingParams = ("max_new_tokens", "stop", "stop_token_ids", "stop_regex", "temperature", "top_p", "top_k", "min_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_new_tokens", "n", "json_schema", "regex", "ebnf", "structural_tag", "ignore_eos", "skip_special_tokens", "spaces_between_special_tokens", "no_stop_trim", "stream_interval", "logit_bias", "sampling_seed", "custom_params", "beam_width", "watermark",)
+_FIELDS_SamplingParams = ("max_new_tokens", "stop", "stop_token_ids", "stop_regex", "temperature", "top_p", "top_k", "min_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_new_tokens", "n", "json_schema", "regex", "ebnf", "structural_tag", "ignore_eos", "skip_special_tokens", "spaces_between_special_tokens", "no_stop_trim", "stream_interval", "logit_bias", "sampling_seed", "custom_params", "beam_width", "watermark", "repetition_detection",)
 
 
 def decode_SamplingParams(value: Any) -> SamplingParams:
@@ -956,6 +974,8 @@ def decode_SamplingParams(value: Any) -> SamplingParams:
             kw["beam_width"] = None if x is None else _expect_int(x, expected="i64")
         elif key == "watermark":
             kw["watermark"] = None if x is None else decode_WatermarkRequestConfig(x)
+        elif key == "repetition_detection":
+            kw["repetition_detection"] = None if x is None else decode_RepetitionDetectionParams(x)
         else:
             raise _unknown_field(key, fields=_FIELDS_SamplingParams)
     return SamplingParams(**kw)
@@ -1016,6 +1036,8 @@ def encode_SamplingParams(v: SamplingParams) -> Dict[str, Any]:
         d["beam_width"] = v.beam_width
     if v.watermark is not None:
         d["watermark"] = encode_WatermarkRequestConfig(v.watermark)
+    if v.repetition_detection is not None:
+        d["repetition_detection"] = encode_RepetitionDetectionParams(v.repetition_detection)
     return d
 
 
@@ -1045,6 +1067,32 @@ def encode_WatermarkRequestConfig(v: WatermarkRequestConfig) -> Dict[str, Any]:
         d["key"] = v.key
     if v.context_window is not None:
         d["context_window"] = v.context_window
+    return d
+
+
+_FIELDS_RepetitionDetectionParams = ("min_pattern_size", "max_pattern_size", "min_count",)
+
+
+def decode_RepetitionDetectionParams(value: Any) -> RepetitionDetectionParams:
+    m = _expect_map(value, expected="struct RepetitionDetectionParams")
+    kw: Dict[str, Any] = {}
+    for key, x in m.items():
+        if key == "min_pattern_size":
+            kw["min_pattern_size"] = _expect_int(x, expected="i64")
+        elif key == "max_pattern_size":
+            kw["max_pattern_size"] = _expect_int(x, expected="i64")
+        elif key == "min_count":
+            kw["min_count"] = _expect_int(x, expected="i64")
+        else:
+            raise _unknown_field(key, fields=_FIELDS_RepetitionDetectionParams)
+    return RepetitionDetectionParams(**kw)
+
+
+def encode_RepetitionDetectionParams(v: RepetitionDetectionParams) -> Dict[str, Any]:
+    d: Dict[str, Any] = {}
+    d["min_pattern_size"] = v.min_pattern_size
+    d["max_pattern_size"] = v.max_pattern_size
+    d["min_count"] = v.min_count
     return d
 
 

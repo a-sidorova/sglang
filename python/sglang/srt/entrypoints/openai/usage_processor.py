@@ -100,9 +100,9 @@ class UsageProcessor:
     ) -> UsageInfo:
         """Calculate token usage information"""
         # `cached_tokens` is already a PromptTokensDetails (or None) carrying the
-        # cached count. Attach multimodal counts to the same object, creating one
-        # only when there is something to report so plain-text requests keep
-        # prompt_tokens_details=None (backward compatible).
+        # cached count, including zero when cache reporting is enabled. Attach
+        # multimodal counts to the same object, creating one when needed even
+        # if cache reporting is disabled.
         details = cached_tokens
         if image_tokens or audio_tokens or video_tokens:
             if details is None:

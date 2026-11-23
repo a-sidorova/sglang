@@ -27,6 +27,19 @@ def _assert_draft_needs_no_conv_sidecar(draft_model_runner) -> None:
         )
 
 
+def _spec_draft_backend_wrapper(draft_model_runner):
+    from sglang.srt.configs.linear_attn_model_registry import (
+        get_linear_attn_spec_by_arch,
+    )
+
+    config = draft_model_runner.model_config.hf_config
+    for arch in getattr(config, "architectures", None) or []:
+        spec = get_linear_attn_spec_by_arch(arch)
+        if spec is not None and spec.draft_backend_wrapper is not None:
+            return spec.draft_backend_wrapper
+    return None
+
+
 class DraftBackendFactory:
     def __init__(
         self,
@@ -113,12 +126,16 @@ class DraftBackendFactory:
             "dsv4": self._create_dsv4_decode_backend,
         }
 
-        return self._create_backend(
+        backend = self._create_backend(
             "decode_attention_backend",
             backend_map,
             "EAGLE is not supported in decode attention backend {backend_type}",
             stamps_children=True,
         )
+        wrap = _spec_draft_backend_wrapper(self.draft_model_runner)
+        if wrap is not None and backend is not None:
+            backend = wrap(self.draft_model_runner, backend, "decode")
+        return backend
 
     def create_draft_extend_backend(self):
         if self.qsa_profile is not None:
@@ -167,6 +184,9 @@ class DraftBackendFactory:
                 backend.prefill_attention_backend_str
             )
             wrapped.decode_attention_backend_str = backend.decode_attention_backend_str
+        wrap = _spec_draft_backend_wrapper(self.draft_model_runner)
+        if wrap is not None and wrapped is not None:
+            wrapped = wrap(self.draft_model_runner, wrapped, "draft_extend")
         return wrapped
 
     @staticmethod

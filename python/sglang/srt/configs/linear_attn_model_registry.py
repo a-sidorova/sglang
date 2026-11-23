@@ -39,6 +39,12 @@ class LinearAttnModelSpec:
     unwrap_text_config: bool = False  # call get_text_config() before isinstance check
     hybrid_backend_class_name: str | None = None
     config_predicate: Callable[[Any], bool] | None = None
+    # Wrap a linear draft's decode container / draft-extend backend with its
+    # recurrent-state lifecycle. Called as (runner, backend, phase).
+    draft_backend_wrapper: Callable[..., Any] | None = None
+    # Checkpoint granularity required by the model, independent of the linear
+    # attention kernel's chunk size. Receives the matched (possibly remote) config.
+    mamba_cache_alignment: Callable[[Any], int] | None = None
 
 
 _LINEAR_ATTN_MODEL_REGISTRY: list[LinearAttnModelSpec] = []
@@ -57,9 +63,15 @@ def register_linear_attn_model(spec: LinearAttnModelSpec) -> None:
 def get_linear_attn_config(hf_config: Any) -> Optional[tuple[LinearAttnModelSpec, Any]]:
     for spec in _LINEAR_ATTN_MODEL_REGISTRY:
         config = hf_config.get_text_config() if spec.unwrap_text_config else hf_config
-        if isinstance(config, spec.config_class) and (
-            spec.config_predicate is None or spec.config_predicate(config)
-        ):
+        matched = isinstance(config, spec.config_class)
+        if not matched and spec.arch_names and spec.config_predicate is not None:
+            # Remote-code checkpoint configs can declare the same architecture
+            # without sharing our config class; its predicate validates it.
+            matched = any(
+                arch in spec.arch_names
+                for arch in (getattr(config, "architectures", None) or [])
+            )
+        if matched and (spec.config_predicate is None or spec.config_predicate(config)):
             return spec, config
     return None
 

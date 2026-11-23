@@ -1,5 +1,6 @@
 import inspect
 import re
+from importlib import import_module
 from typing import Dict, List, Optional, Tuple, Type
 
 from transformers import PreTrainedTokenizerBase
@@ -2254,7 +2255,7 @@ class ReasoningParser:
             intact for the downstream detector).
     """
 
-    DetectorMap: Dict[str, Type[BaseReasoningFormatDetector]] = {
+    DetectorMap: Dict[str, Type[BaseReasoningFormatDetector] | str] = {
         "apertus2509": Apertus2509Detector,
         "deepseek-r1": DeepSeekR1Detector,
         "deepseek-v3": _DeepSeekV3Detector,
@@ -2306,6 +2307,9 @@ class ReasoningParser:
         detector_class = self.DetectorMap.get(model_type.lower())
         if not detector_class:
             raise ValueError(f"Unsupported model type: {model_type}")
+        if isinstance(detector_class, str):
+            module_name, class_name = detector_class.rsplit(".", 1)
+            detector_class = getattr(import_module(module_name), class_name)
 
         chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
 
@@ -2331,6 +2335,8 @@ class ReasoningParser:
 
         # Only pass force_reasoning if explicitly set, let detectors use their defaults
         kwargs = {"stream_reasoning": stream_reasoning}
+        if "request" in inspect.signature(detector_class).parameters:
+            kwargs["request"] = request
         if force_reasoning is not None:
             kwargs["force_reasoning"] = force_reasoning
 

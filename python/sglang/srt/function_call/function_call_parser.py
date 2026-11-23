@@ -118,15 +118,22 @@ class FunctionCallParser:
     }
 
     def __init__(
-        self, tools: List[Tool], tool_call_parser: str, tokenizer=None, tool_choice=None
+        self,
+        tools: List[Tool],
+        tool_call_parser: str,
+        tokenizer=None,
+        parallel_tool_calls: bool = True,
+        tool_choice=None,
     ):
         detector_class = self.ToolCallParserEnum.get(tool_call_parser)
         if detector_class:
             kwargs = {}
+            sig = inspect.signature(detector_class)
             if tokenizer is not None:
-                sig = inspect.signature(detector_class)
                 if "tokenizer" in sig.parameters:
                     kwargs["tokenizer"] = tokenizer
+            if "parallel_tool_calls" in sig.parameters:
+                kwargs["parallel_tool_calls"] = parallel_tool_calls
             detector = detector_class(**kwargs)
         else:
             raise ValueError(f"Unsupported tool_call_parser: {tool_call_parser}")
@@ -383,5 +390,7 @@ class FunctionCallParser:
                 )
                 return ("json_schema", json_schema)
         except Exception as e:
+            if self.detector.raise_on_structure_error:
+                raise
             logger.error(f"Error getting structure constraint: {e}")
             return None

@@ -363,6 +363,7 @@ def kda_extend_in_graph(
         dt_bias=layer.dt_bias,
         lower_bound=layer.lower_bound,
         beta_is_raw=gate_was_flat,
+        beta_scale=getattr(layer, "beta_scale", 1.0),
         extend_seq_lens_cpu=None,
         is_spec_decode=False,
         return_intermediate_states=False,

@@ -337,7 +337,12 @@ class KDAKernelDispatcher:
                 f"lower_bound (safe gate) is only supported by TritonKDAKernel; "
                 f"got {self.decode_kernel.__class__.__name__}."
             )
-        return self.decode_kernel.decode(
+        kernel = (
+            self.triton_kernel
+            if kwargs.get("beta_scale", 1.0) != 1.0
+            else self.decode_kernel
+        )
+        return kernel.decode(
             q,
             k,
             v,
@@ -382,7 +387,12 @@ class KDAKernelDispatcher:
                 "lower_bound (safe gate) target verify is not supported by "
                 f"{self.verify_kernel.__class__.__name__}."
             )
-        return self.verify_kernel.target_verify(
+        kernel = (
+            self.triton_kernel
+            if kwargs.get("beta_scale", 1.0) != 1.0
+            else self.verify_kernel
+        )
+        return kernel.target_verify(
             A_log=A_log,
             dt_bias=dt_bias,
             q=q,
@@ -402,9 +412,13 @@ class KDAKernelDispatcher:
             **kwargs,
         )
 
-    def effective_extend_kernel(self, lower_bound: Optional[float], num_tokens: int):
-        """The packed FlashInfer prefill kernel requires more than one token."""
+    def effective_extend_kernel(
+        self, lower_bound: Optional[float], num_tokens: int, beta_scale: float = 1.0
+    ):
+        """Select the extend kernel after token-count, beta-scale and safe-gate fallbacks."""
         kernel = self.extend_kernel
+        if beta_scale != 1.0:
+            return self.triton_kernel
         if self.prefill_backend.is_flashinfer() and num_tokens <= 1:
             return self.triton_kernel
         if lower_bound is not None and not getattr(kernel, "supports_safe_gate", True):
@@ -424,7 +438,11 @@ class KDAKernelDispatcher:
         query_start_loc: torch.Tensor,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        kernel = self.effective_extend_kernel(kwargs.get("lower_bound"), q.shape[1])
+        kernel = self.effective_extend_kernel(
+            kwargs.get("lower_bound"),
+            q.shape[1],
+            beta_scale=kwargs.get("beta_scale", 1.0),
+        )
         return kernel.extend(
             q,
             k,
@@ -942,9 +960,13 @@ class KDAAttnBackend(MambaAttnBackendBase):
         )
 
         # The packed kernel assumes one token per request.
-        if self.kernel_dispatcher.supports_packed_decode and (
-            getattr(layer, "lower_bound", None) is None
-            or self.kernel_dispatcher.supports_packed_decode_safe_gate
+        if (
+            self.kernel_dispatcher.supports_packed_decode
+            and getattr(layer, "beta_scale", 1.0) == 1.0
+            and (
+                getattr(layer, "lower_bound", None) is None
+                or self.kernel_dispatcher.supports_packed_decode_safe_gate
+            )
         ):
             assert qkv.shape[0] == cache_indices.shape[0], (
                 "KDA packed decode requires one token per sequence (T=1): "
@@ -990,6 +1012,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             cache_indices=cache_indices,
             query_start_loc=query_start_loc,
             lower_bound=layer.lower_bound,
+            beta_scale=getattr(layer, "beta_scale", 1.0),
         )
 
         self._track_mamba_state_decode(
@@ -1091,7 +1114,8 @@ class KDAAttnBackend(MambaAttnBackendBase):
         k = k.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
         v = v.unflatten(-1, (-1, layer.head_v_dim)).unsqueeze(0)  # n (h d) -> 1 n h d
 
-        if a.ndim == 3:
+        gate_was_flat = a.ndim == 3
+        if gate_was_flat:
             a = a.unflatten(-1, (-1, layer.head_k_dim))
 
         track_ssm = self.forward_metadata.has_mamba_track_mask
@@ -1110,7 +1134,9 @@ class KDAAttnBackend(MambaAttnBackendBase):
             # Check the kernel the dispatcher will actually run (safe-gate
             # reroute included), not just the configured one.
             extend_kernel = self.kernel_dispatcher.effective_extend_kernel(
-                layer.lower_bound, q.shape[1]
+                layer.lower_bound,
+                q.shape[1],
+                beta_scale=getattr(layer, "beta_scale", 1.0),
             )
             assert extend_kernel.supports_track_state_snapshot, (
                 f"{type(extend_kernel).__name__} cannot write the fp32 track "
@@ -1135,7 +1161,8 @@ class KDAAttnBackend(MambaAttnBackendBase):
             A_log=layer.A_log,
             dt_bias=layer.dt_bias,
             lower_bound=layer.lower_bound,
-            beta_is_raw=True,
+            beta_is_raw=gate_was_flat,
+            beta_scale=getattr(layer, "beta_scale", 1.0),
             extend_seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
             extend_prefix_lens=forward_batch.extend_prefix_lens,
             layer_id=layer.layer_id,
@@ -1424,6 +1451,7 @@ class KDAAttnBackend(MambaAttnBackendBase):
             cache_steps=draft_token_num,
             retrieve_parent_token=retrieve_parent_token,
             lower_bound=layer.lower_bound,
+            beta_scale=getattr(layer, "beta_scale", 1.0),
             **ring_kwargs,
             **(
                 dict(
@@ -1472,6 +1500,8 @@ class KDAAttnBackend(MambaAttnBackendBase):
         replayssm_beta: Optional[torch.Tensor],
     ) -> bool:
         if self._fused_chain_verify_fn is None or not mixed_qkv.is_cuda:
+            return False
+        if getattr(layer, "beta_scale", 1.0) != 1.0:
             return False
         if any(
             value is not None

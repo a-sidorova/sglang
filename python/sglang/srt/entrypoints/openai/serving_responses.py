@@ -542,6 +542,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                             else None
                         ),
                         sampling_params=sampling_params,
+                        custom_logit_processor=request.custom_logit_processor,
                         stream=request.stream,
                         rid=request.request_id,
                         session_id=request.session_id,
@@ -685,6 +686,7 @@ class OpenAIServingResponses(OpenAIServingChat):
             stop=request.stop,
             reasoning_effort=(request.reasoning.effort if request.reasoning else None),
             chat_template_kwargs=request.chat_template_kwargs,
+            custom_params=request.custom_params,
         )
 
         media_error = self._validate_media_content(chat_request)
@@ -693,6 +695,7 @@ class OpenAIServingResponses(OpenAIServingChat):
 
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
         processed_messages = self._process_messages(chat_request, is_multimodal)
+        request.custom_params = chat_request.custom_params
         # ``_process_messages`` merges server defaults into the temporary Chat
         # request before rendering. Response parsing happens later from the
         # original request, so carry over the exact template kwargs that selected
@@ -1075,6 +1078,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                 chat_tools,
                 self.tool_call_parser,
                 tokenizer=self.tokenizer_manager.tokenizer,
+                parallel_tool_calls=request.parallel_tool_calls,
                 tool_choice=tool_choice,
             )
             detector_owns_format = self._tool_parser_owns_format(parser)
@@ -2007,6 +2011,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                     chat_tools,
                     self.tool_call_parser,
                     tokenizer=self.tokenizer_manager.tokenizer,
+                    parallel_tool_calls=request.parallel_tool_calls,
                     tool_choice=tool_choice,
                 )
                 detector_owns_format = self._tool_parser_owns_format(probe)
@@ -2017,6 +2022,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                     chat_tools,
                     self.tool_call_parser,
                     tokenizer=self.tokenizer_manager.tokenizer,
+                    parallel_tool_calls=request.parallel_tool_calls,
                     tool_choice=tool_choice,
                 )
         reasoning_parser_obj: Optional[ReasoningParser] = None
@@ -2727,6 +2733,7 @@ class OpenAIServingResponses(OpenAIServingChat):
             adapted_request = GenerateReqInput(
                 input_ids=prompt_token_ids,
                 sampling_params=sampling_params,
+                custom_logit_processor=adapted_request.custom_logit_processor,
                 stream=adapted_request.stream,
                 rid=request_id,
                 session_id=adapted_request.session_id,

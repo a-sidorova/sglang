@@ -385,6 +385,8 @@ def fused_moe_kernel(
     LORA_PRESERVE_BASE: tl.constexpr,
     ROUTER_TOPK: tl.constexpr,
     FUSE_SWIGLU: tl.constexpr = False,
+    FUSE_SWIGLU_FP32: tl.constexpr = False,
+    SWIGLU_LIMIT: tl.constexpr = 0.0,
     USE_GDC: tl.constexpr = False,
     GDC_EARLY: tl.constexpr = False,
 ):
@@ -475,6 +477,10 @@ def fused_moe_kernel(
         return
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
+    if FUSE_SWIGLU_FP32:
+        # Read canonical [gate; up] weights as adjacent gate/up pairs without
+        # changing their checkpoint or online-update layout.
+        offs_bn = offs_bn // 2 + (offs_bn % 2) * (N // 2)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     if a_desc is not None:
         assert use_fp8_w8a8 and group_n > 0 and group_k > 0
@@ -618,14 +624,15 @@ def fused_moe_kernel(
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator *= moe_weight[:, None]
 
-    accumulator = accumulator.to(compute_type)
+    if not FUSE_SWIGLU_FP32:
+        accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
 
     if FUSE_SWIGLU:
-        # W13 rows were interleaved at load time, so gate/up of the same
-        # intermediate channel sit in adjacent (even, odd) columns of this
+        # Gate/up are paired either at load time (legacy) or by the virtual
+        # column indices above (FP32 policy). Each pair occupies even/odd columns of this
         # tile; silu(gate) * up is applied in-register and only the
         # half-width activation is stored, eliminating intermediate_cache1
         # and the standalone activation launch.
@@ -641,6 +648,10 @@ def fused_moe_kernel(
         acc_pairs = tl.reshape(accumulator, (BLOCK_SIZE_M, BLOCK_SIZE_N // 2, 2))
         gate_b, up_b = tl.split(acc_pairs)
         gate_f = gate_b.to(tl.float32)
+        up_f = up_b.to(tl.float32)
+        if SWIGLU_LIMIT > 0.0:
+            gate_f = tl.minimum(gate_f, SWIGLU_LIMIT)
+            up_f = tl.maximum(tl.minimum(up_f, SWIGLU_LIMIT), -SWIGLU_LIMIT)
         # __expf(-x) == ex2.approx(x * -log2(e)); folding the negation into
         # the constant (0fBFB8AA3B == -log2(e)) flips the sign exactly.
         exp_neg = tl.inline_asm_elementwise(
@@ -651,15 +662,27 @@ def fused_moe_kernel(
             is_pure=True,
             pack=1,
         )
-        silu_f = tl.inline_asm_elementwise(
-            "div.approx.ftz.f32 $0, $1, $2;",
-            "=f,f,f",
-            [gate_f, 1.0 + exp_neg],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
-        out_act = (silu_f * up_b.to(tl.float32)).to(compute_type)
+        if FUSE_SWIGLU_FP32:
+            # Sonic/Quack keeps the accumulator through x * rcp(1+exp(-x)).
+            reciprocal = tl.inline_asm_elementwise(
+                "rcp.approx.ftz.f32 $0, $1;",
+                "=f,f",
+                [1.0 + exp_neg],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
+            silu_f = gate_f * reciprocal
+        else:
+            silu_f = tl.inline_asm_elementwise(
+                "div.approx.ftz.f32 $0, $1, $2;",
+                "=f,f,f",
+                [gate_f, 1.0 + exp_neg],
+                dtype=tl.float32,
+                is_pure=True,
+                pack=1,
+            )
+        out_act = (silu_f * up_f).to(compute_type)
         offs_half = pid_n * (BLOCK_SIZE_N // 2) + tl.arange(0, BLOCK_SIZE_N // 2)
         if c_sorted:
             c_ptrs = (
@@ -821,13 +844,17 @@ def invoke_fused_moe_kernel(
     mask_output: bool = False,
     lora_preserve_base: bool = False,
     fuse_swiglu: bool = False,
+    fuse_swiglu_fp32: bool = False,
+    swiglu_limit: Optional[float] = None,
 ) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
+    if fuse_swiglu_fp32:
+        assert fuse_swiglu and not b_use_tma
 
     if fuse_swiglu:
-        # The epilogue assumes an interleaved-gate/up bf16 up-GEMM writing a
-        # plain half-width output; every other output flavor is out of scope.
+        # The epilogue writes a plain half-width activation from paired
+        # gate/up accumulators; every other output flavor is out of scope.
         # In particular the LoRA output paths (fuse_add_to_output / mask_output)
         # address C at full width N and would corrupt the half-width buffer.
         assert not (use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
@@ -1054,6 +1081,8 @@ def invoke_fused_moe_kernel(
             FUSE_SUM_ALL_REDUCE=fuse_sum_all_reduce,
             ROUTER_TOPK=router_topk,
             FUSE_SWIGLU=fuse_swiglu,
+            FUSE_SWIGLU_FP32=fuse_swiglu_fp32,
+            SWIGLU_LIMIT=0.0 if swiglu_limit is None else float(swiglu_limit),
             **pdl_kwargs,
             **config,
         )

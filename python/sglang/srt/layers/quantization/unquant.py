@@ -1086,6 +1086,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, BaseFusedOp):
     # (pre-existing behavior); under torch.compile the dedicated
     # fused_moe_forward_native is installed instead via this hook.
     def _torch_compile_forward(self, num_tokens: int) -> Optional[Callable]:
+        # AITER consumes weights shuffled at load time. The native einsum
+        # implementation assumes canonical expert matrices, so switching to
+        # it at bs=1 is invalid even while the surrounding model is compiled.
+        # Keep the runner that owns the loaded layout, as for larger batches.
+        if getattr(self, "_aiter_runner", None) is not None:
+            return None
+        # The native einsum path rounds the projections before activation.
+        config = getattr(self, "moe_runner_config", None)
+        if config is not None and config.activation == "silu_fp32_accum":
+            return None
         # torch.compile on this layer only pays off at bs=1; keep the
         # optimized dispatch otherwise.
         if num_tokens == 1:
@@ -1300,7 +1310,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, BaseFusedOp):
         layer: torch.nn.Module,
         dispatch_output: DispatchOutput,
     ) -> CombineInput:
-
         return self.runner.run(dispatch_output, layer)
 
     def forward_tpu(self, *args, **kwargs) -> CombineInput:

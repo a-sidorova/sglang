@@ -154,6 +154,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
             softplus_threshold=20.0,
             is_kda=True,
             lower_bound=lower_bound,
+            beta_scale=kwargs.get("beta_scale", 1.0),
         )
 
     def target_verify(
@@ -214,6 +215,7 @@ class TritonKDAKernel(LinearAttnKernelBase):
             replayssm_rawk=replayssm_rawk,
             replayssm_g=replayssm_g,
             replayssm_beta=replayssm_beta,
+            beta_scale=kwargs.get("beta_scale", 1.0),
         )
 
     def extend(

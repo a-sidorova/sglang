@@ -160,6 +160,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
             "presence_penalty": request.presence_penalty,
             "frequency_penalty": request.frequency_penalty,
             "repetition_penalty": request.repetition_penalty,
+            "repetition_detection": request.repetition_detection,
             "regex": request.regex,
             "json_schema": request.json_schema,
             "ebnf": request.ebnf,

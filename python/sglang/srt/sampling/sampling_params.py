@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Sequence, Set, Union
 
 import msgspec
 
+from sglang.srt.sampling.repetition_detection import RepetitionDetectionParams
 from sglang.srt.sampling.watermarking.core import (
     WatermarkRequestConfig,
     normalize_watermark_request,
@@ -165,7 +166,19 @@ class SamplingParams(msgspec.Struct, kw_only=True, array_like=True):
     is_normalized: bool = False  # set by normalize()
     ebnf_full_assistant: bool = False
 
+    # Append new fields to preserve the positional msgpack wire layout.
+    repetition_detection: Optional[RepetitionDetectionParams] = None
+
     def __post_init__(self):
+        if isinstance(self.repetition_detection, dict):
+            self.repetition_detection = RepetitionDetectionParams(
+                **self.repetition_detection
+            )
+        elif self.repetition_detection is not None and not isinstance(
+            self.repetition_detection, RepetitionDetectionParams
+        ):
+            raise ValueError("repetition_detection must be an object or null")
+
         # For non-optional params, treat None as "use default" so that callers
         # (e.g. /generate) can pass null without crashing verify().
 

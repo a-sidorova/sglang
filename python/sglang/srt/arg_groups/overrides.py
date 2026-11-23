@@ -1861,7 +1861,8 @@ def flashinfer_a2a_max_dispatch_tokens_per_rank(prefill_buffer_tokens: int) -> i
 def mamba_cache_chunk_size(server_args: Any) -> int:
     # For mamba cache with extra buffer, the chunk size is the max of FLA_CHUNK_SIZE
     # (or mamba_chunk_size if it is defined in the model's config) and page_size.
-    # It is used to determine the caching point in a sequence during prefill.
+    # Model-specific checkpoint alignment can widen this further. This is the
+    # caching point granularity, not the kernel's mamba_chunk_size.
     # A pre-seeded `_mamba_cache_chunk_size` (fixtures supply one so a dummy
     # model never loads an HF config) is honored as-is; otherwise the memo
     # is only kept once the record is resolved, because `page_size` below
@@ -1877,15 +1878,35 @@ def mamba_cache_chunk_size(server_args: Any) -> int:
             # Must match sglang.kernels.ops.attention.fla.chunk_delta_h.CHUNK_SIZE
             FLA_CHUNK_SIZE = 64
 
-        hf_config = model_config_of(server_args).hf_config
+        model_config = model_config_of(server_args)
+        hf_config = model_config.hf_config
         chunk_size = getattr(hf_config, "mamba_chunk_size", FLA_CHUNK_SIZE)
         page_size = resolved_view(server_args).page_size
         assert max(chunk_size, page_size) % min(chunk_size, page_size) == 0, (
             f"For SSM models, either chunk_size or page_size must be divisible by the other, got {chunk_size=}, {page_size=}"
         )
+        cache_chunk_size = max(chunk_size, page_size)
+        # Read the architecture's pure cache policy without running its config
+        # predicate: resolution precedes distributed init, and caching a spec on
+        # ModelConfig would also pickle its callbacks when spawning workers.
+        from sglang.srt.configs.linear_attn_model_registry import (
+            get_linear_attn_spec_by_arch,
+        )
+
+        for arch in getattr(hf_config, "architectures", None) or ():
+            spec = get_linear_attn_spec_by_arch(arch)
+            if spec is not None and spec.mamba_cache_alignment is not None:
+                config = (
+                    hf_config.get_text_config()
+                    if spec.unwrap_text_config
+                    else hf_config
+                )
+                cache_chunk_size = math.lcm(
+                    cache_chunk_size, spec.mamba_cache_alignment(config)
+                )
         if not getattr(server_args, "_resolution_finished", False):
-            return max(chunk_size, page_size)
-        server_args._mamba_cache_chunk_size = max(chunk_size, page_size)
+            return cache_chunk_size
+        server_args._mamba_cache_chunk_size = cache_chunk_size
     return server_args._mamba_cache_chunk_size
 
 

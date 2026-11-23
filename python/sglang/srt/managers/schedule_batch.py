@@ -138,6 +138,7 @@ from sglang.srt.observability.req_time_stats import (
     DPControllerReqTimeStats,
     SchedulerReqTimeStats,
 )
+from sglang.srt.sampling.repetition_detection import check_sequence_repetition
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_mask import SamplingMaskRows
 from sglang.srt.sampling.sampling_params import SamplingParams
@@ -311,6 +312,11 @@ class FINISH_LENGTH(BaseFinishReason):
             "type": "length",  # to match OpenAI API's return value
             "length": self.length,
         }
+
+
+class FINISH_REPETITION(BaseFinishReason):
+    def to_json(self):
+        return {"type": "repetition"}
 
 
 class FINISH_ABORT(BaseFinishReason):
@@ -1115,11 +1121,13 @@ class Req(ReqDllmMixin):
         self._think_end_match_len = 0
 
         # Only custom logit processors need the "__req__" reference cycle.
-        if custom_logit_processor is not None and isinstance(
-            sampling_params.custom_params, dict
+        # Supply request context even when callers omit custom_params.
+        if custom_logit_processor is not None and (
+            sampling_params.custom_params is None
+            or isinstance(sampling_params.custom_params, dict)
         ):
             sampling_params = copy.copy(sampling_params)
-            sampling_params.custom_params = sampling_params.custom_params | {
+            sampling_params.custom_params = (sampling_params.custom_params or {}) | {
                 "__req__": self
             }
         self.sampling_params = sampling_params
@@ -1910,6 +1918,30 @@ class Req(ReqDllmMixin):
             self.finished_reason = FINISH_LENGTH(length=max_new_tokens)
             self.finished_len = max_new_tokens
 
+    def _check_repetition_finish(self, new_accepted_len: int) -> bool:
+        params = self.sampling_params.repetition_detection
+        if params is None or params.max_pattern_size <= 0:
+            return False
+
+        # Scan each newly accepted prefix, including mid-step speculative stops.
+        # EOS/explicit stops win ties; the length cap wins at its boundary.
+        end = min(len(self.output_ids), self.sampling_params.max_new_tokens - 1)
+        if self.finished_reason is not None:
+            if self.finished_len is None:
+                return False
+            end = min(end, self.finished_len - 1)
+        start = max(
+            len(self.output_ids) - new_accepted_len + 1,
+            self.sampling_params.min_new_tokens,
+            max(1, params.min_pattern_size) * params.min_count,
+        )
+        for finished_len in range(start, end + 1):
+            if check_sequence_repetition(self.output_ids, params, end=finished_len):
+                self.finished_reason = FINISH_REPETITION()
+                self.finished_len = finished_len
+                return True
+        return False
+
     def update_finish_state(self, new_accepted_len: int = 1):
         if self.finished():
             return
@@ -1931,6 +1963,7 @@ class Req(ReqDllmMixin):
         # token and leak the stop string.
         if self._check_str_based_finish(new_accepted_len):
             self._cap_finished_len_at_max_new_tokens()
+            self._check_repetition_finish(new_accepted_len)
             return
 
         # Stop token/EOS beats the length cap for the same reason: a spec accept
@@ -1939,6 +1972,10 @@ class Req(ReqDllmMixin):
         # (up to the cap) in the emitted output.
         if self._check_token_based_finish(new_accepted_tokens):
             self._cap_finished_len_at_max_new_tokens()
+            self._check_repetition_finish(new_accepted_len)
+            return
+
+        if self._check_repetition_finish(new_accepted_len):
             return
 
         if len(self.output_ids) >= self.sampling_params.max_new_tokens:

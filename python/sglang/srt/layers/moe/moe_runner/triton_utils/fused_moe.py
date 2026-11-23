@@ -114,7 +114,7 @@ def _validate_fused_swiglu_interleaved(
     dtype: torch.dtype,
 ) -> None:
     if not (
-        activation == "silu"
+        activation in ("silu", "silu_fp32_accum")
         and is_gated
         and not has_gemm1_modifiers
         and not has_bias
@@ -563,12 +563,25 @@ def _fused_moe_kernel_sequence(
     Supports optional LoRA hooks that fire between the two kernels and before
     combine. Returns ``out_hidden_states``.
 
+    ``silu_fp32_accum`` retains FP32 projection accumulators through SwiGLU
+    and stores the activation in BF16. Combined outputs retain weighted down
+    projections and their sum in FP32 until the final BF16 store. It consumes
+    canonical BF16 weights, including at bs=1; ``no_combine`` keeps BF16
+    individual expert outputs.
+
     ``a1_q`` (SGLANG_OPT_MOE_QUANT_ONCE): optional pre-quantized fp8 view of
     ``hidden_states`` for the gate-up GEMM (per-token-group ``block_shape[1]``
     quant, ``a1_scale`` holds the matching scales, rows may exceed
     ``num_tokens`` due to 4-row padding). ``hidden_states`` stays bf16 and is
     still used for output dtype/shape and the inplace combine.
     """
+    fp32_swiglu = activation == "silu_fp32_accum"
+    fp32_combine = fp32_swiglu and not no_combine
+    if fp32_swiglu and fuse_swiglu_interleaved:
+        raise ValueError(
+            "FP32 accumulator SwiGLU requires canonical [gate; up] weights"
+        )
+    fused_activation = fuse_swiglu_interleaved or fp32_swiglu
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     topk = topk_ids.shape[1]
@@ -623,14 +636,20 @@ def _fused_moe_kernel_sequence(
         and (topk > 2)
         and (not use_int8_w8a16)
         and (not use_int4_w4a16)
+        and not fp32_combine
     )
 
-    if fuse_swiglu_interleaved:
+    if fused_activation:
         _validate_fused_swiglu_interleaved(
             activation=activation,
             is_gated=is_gated,
             has_gemm1_modifiers=any(
-                value is not None for value in (gemm1_alpha, gemm1_limit, swiglu_limit)
+                value is not None
+                for value in (
+                    gemm1_alpha,
+                    gemm1_limit,
+                    None if fp32_swiglu else swiglu_limit,
+                )
             ),
             has_bias=b1 is not None,
             is_quantized=any(
@@ -677,9 +696,11 @@ def _fused_moe_kernel_sequence(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         c_sorted=down_moe_use_tma,
-        b_use_tma=up_moe_use_tma,
+        b_use_tma=up_moe_use_tma and not fp32_swiglu,
         filter_expert=filter_expert,
-        fuse_swiglu=fuse_swiglu_interleaved,
+        fuse_swiglu=fused_activation,
+        fuse_swiglu_fp32=fp32_swiglu,
+        swiglu_limit=swiglu_limit if fp32_swiglu else None,
     )
 
     if hooks and hooks.after_gate_up:
@@ -694,7 +715,7 @@ def _fused_moe_kernel_sequence(
             topk_ids,
         )
 
-    if not fuse_swiglu_interleaved:
+    if not fused_activation:
         intermediate_cache2 = torch.empty(
             (total_tokens, N // 2),
             device=hidden_states.device,
@@ -712,7 +733,7 @@ def _fused_moe_kernel_sequence(
     )
 
     # Activation function with multiplication
-    if fuse_swiglu_interleaved:
+    if fused_activation:
         # silu(gate) * up was already applied by the up-GEMM epilogue.
         pass
     elif activation == "silu_rounded" and is_gated:
@@ -857,7 +878,7 @@ def _fused_moe_kernel_sequence(
     intermediate_cache3 = torch.empty(
         (num_tokens, topk, w2.shape[1]),
         device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        dtype=torch.float32 if fp32_combine else hidden_states.dtype,
     )
 
     # LoRA hooks force the second kernel to write to intermediate_cache3 so
@@ -914,7 +935,9 @@ def _fused_moe_kernel_sequence(
         not apply_router_weight_on_input and not no_combine,
         1,
         down_config or config,
-        compute_type=compute_type,
+        # For unquantized experts this selects the epilogue dtype; the GEMM
+        # operands remain BF16. Keep routing-weight products in FP32.
+        compute_type=tl.float32 if fp32_combine else compute_type,
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
@@ -940,6 +963,10 @@ def _fused_moe_kernel_sequence(
 
     if no_combine:
         pass
+    elif fp32_combine and _use_intermediate:
+        moe_sum_reduce_triton(
+            intermediate_cache3, out_hidden_states, routed_scaling_factor
+        )
     elif _is_cuda or _is_musa:
         if use_fused_moe_sum_all_reduce:
             if routed_scaling_factor != 1.0:

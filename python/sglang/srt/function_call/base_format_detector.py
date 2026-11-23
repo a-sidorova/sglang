@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 class BaseFormatDetector(ABC):
     """Base class providing two sets of interfaces: one-time and streaming incremental."""
 
+    raise_on_structure_error = False
+
     def __init__(self):
         # Streaming state management
         # Buffer for accumulating incomplete patterns that arrive across multiple streaming chunks

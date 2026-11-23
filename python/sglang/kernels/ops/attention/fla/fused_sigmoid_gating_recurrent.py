@@ -197,6 +197,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     CACHE_RING: tl.constexpr = False,
     SPLIT_N_HV_GRID: tl.constexpr = False,
     USE_GDC: tl.constexpr = False,
+    BETA_SCALE: tl.constexpr = 1.0,
     MATCH_CUTEDSL_DECODE: tl.constexpr = False,
     ROUND_STATE_TO_BF16: tl.constexpr = False,
 ):
@@ -358,7 +359,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         if MATCH_CUTEDSL_DECODE:
             b_beta = b_b
         else:
-            b_beta = 1.0 / (1.0 + tl.exp(-b_b))
+            b_beta = BETA_SCALE / (1.0 + tl.exp(-b_b))
 
         # fused ring-write: stash this step's raw inputs + in-kernel gate/beta
         # into the per-slot ring for the commit fold to replay. Must sit here --
@@ -430,13 +431,11 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
                 k_sum_sq = _cutedsl_qk_sum_squares(b_k, BK)
                 q_rsqrt = tl.rsqrt(q_sum_sq + 1e-6)
                 k_rsqrt = tl.rsqrt(k_sum_sq + 1e-6)
+                b_q *= q_rsqrt
+                b_k *= k_rsqrt
             else:
-                q_sum_sq = tl.sum(b_q * b_q)
-                k_sum_sq = tl.sum(b_k * b_k)
-                q_rsqrt = 1.0 / tl.sqrt(q_sum_sq + 1e-6)
-                k_rsqrt = 1.0 / tl.sqrt(k_sum_sq + 1e-6)
-            b_q *= q_rsqrt
-            b_k *= k_rsqrt
+                b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+                b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
 
         b_q = b_q * scale
 
@@ -465,8 +464,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         # Update hidden state: h += k[:, None] * v[None, :]
         if MATCH_CUTEDSL_DECODE:
             b_h = tl.fma(b_k[:, None], b_v[None, :], b_h)
-        elif IS_KDA and V == 128 and BV == 4:
-            # The narrow KDA tile keeps the separate FP32 multiply/add rounding.
+        elif IS_KDA and DISABLE_STATE_UPDATE and V == 128 and BV == 4:
+            # The narrow KDA verify tile keeps separate FP32 multiply/add rounding.
             b_h = tl.inline_asm_elementwise(
                 "add.rn.f32 $0, $1, $2;",
                 constraints="=f,f,f",
@@ -559,6 +558,7 @@ def fused_sigmoid_gating_delta_rule_update(
     replayssm_rawk: Optional[torch.Tensor] = None,
     replayssm_g: Optional[torch.Tensor] = None,
     replayssm_beta: Optional[torch.Tensor] = None,
+    beta_scale: float = 1.0,
     # Reproduce FlashInfer's `recurrent_kda` CuTe DSL decode kernel step for
     # step: `b` is then the already-sigmoided FP32 beta, the gate is formed in
     # base 2 with ex2/lg2.approx, Q/K norms reduce lane-striped, the state
@@ -620,7 +620,14 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    # Varlen decode/verify can leave physical padding rows outside cu_seqlens.
+    # Those rows are still consumed by the graph's norm, projections and MoE.
+    # Start them at zero instead of exposing recycled allocator contents.
+    o = (
+        q.new_zeros(NK, *v.shape)
+        if cu_seqlens is not None
+        else q.new_empty(NK, *v.shape)
+    )
 
     # Prepare retrieve_parent_token strides
     if retrieve_parent_token is not None:
@@ -726,6 +733,7 @@ def fused_sigmoid_gating_delta_rule_update(
         IS_VARLEN=cu_seqlens is not None,
         IS_KDA=is_kda,
         USE_LOWER_BOUND=lower_bound is not None,
+        BETA_SCALE=beta_scale,
         DISABLE_STATE_UPDATE=disable_state_update,
         CACHE_INTERMEDIATE_STATES=intermediate_states_buffer is not None,
         HAS_EAGLE_TREE_CUSTOM_ATTN_MASK=retrieve_parent_token is not None,

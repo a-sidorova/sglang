@@ -159,7 +159,10 @@ from sglang.srt.runtime_context import (
     get_serving,
     get_spec,
 )
-from sglang.srt.sampling.custom_logit_processor import supports_sampling_mask
+from sglang.srt.sampling.custom_logit_processor import (
+    supports_sampling_mask,
+    validate_custom_logit_processor,
+)
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.sampling.watermarking.core import (
     redact_watermark_command_line,
@@ -1571,6 +1574,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
         # Build return object
         if isinstance(obj, GenerateReqInput):
+            if obj.custom_logit_processor:
+                validate_custom_logit_processor(
+                    obj.custom_logit_processor, sampling_params.custom_params
+                )
             session_params = (
                 SessionParams(**obj.session_params) if obj.session_params else None
             )

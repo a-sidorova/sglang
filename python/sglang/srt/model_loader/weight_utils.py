@@ -1863,7 +1863,8 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
     }
     for quark_scale_name, sglang_scale_name in quark_scale_names.items():
         if name.endswith(quark_scale_name):
-            return name.replace(quark_scale_name, sglang_scale_name)
+            remapped_name = name.replace(quark_scale_name, sglang_scale_name)
+            return remapped_name if remapped_name in params_dict else None
 
     # If there were no matches, return the untouched param name
     return name
