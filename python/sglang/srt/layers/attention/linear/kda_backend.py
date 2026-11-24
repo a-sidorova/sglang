@@ -1081,7 +1081,16 @@ class KDAAttnBackend(MambaAttnBackendBase):
         if forward_batch.forward_mode.is_target_verify():
             return self._forward_target_verify(layer, forward_batch, mixed_qkv, a, b)
 
+        # A Solar Open3 SDA layer on ROCm brings its own prefill kernel (aiter's
+        # flash_sda: grouped decay, exact erase); see solar_open3/amd.
+        sda_prefill = getattr(layer, "sda_prefill", None)
+
         if self.prefill_graph_metadata is not None:
+            if sda_prefill is not None:
+                raise NotImplementedError(
+                    "Solar Open3 SDA (ROCm) has no host-free prefill-graph extend; "
+                    "use --cuda-graph-backend-prefill disabled or tc_piecewise"
+                )
             # Breakable prefill CUDA graph bucket: host-free chain on static
             # tables refreshed before each replay.
             layer_cache = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
@@ -1173,7 +1182,12 @@ class KDAAttnBackend(MambaAttnBackendBase):
                 dtype=torch.float32,
                 device=ssm_states.device,
             )
-        core_attn_out = self.kernel_dispatcher.extend(
+        extend = (
+            sda_prefill.extend
+            if sda_prefill is not None
+            else self.kernel_dispatcher.extend
+        )
+        core_attn_out = extend(
             q=q,
             k=k,
             v=v,

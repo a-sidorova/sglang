@@ -98,7 +98,7 @@ from sglang.srt.models.solar_open2 import (
 )
 from sglang.srt.models.transformers import maybe_prefix
 from sglang.srt.runtime_context import get_exec, get_parallel
-from sglang.srt.utils import make_layers
+from sglang.srt.utils import is_hip, make_layers
 from sglang.srt.utils.common import BumpAllocator
 from sglang.srt.utils.custom_op import register_custom_op
 
@@ -612,6 +612,44 @@ class SolarOpen3KimiDeltaAttention(SolarOpen2KimiDeltaAttention):
         self.round_sda_prefill_beta = getattr(
             config, "linear_attn", None
         ) == "sda" and not getattr(config, "sda_beta_fp32", False)
+        # ROCm: this layer's prefill / extend / mixed batches run aiter's flash_sda
+        # (grouped decay, the checkpoint's erase); the KDA backend calls
+        # `self.attn.sda_prefill` instead of its kernel dispatcher. Decode and verify
+        # stay on SGLang's Triton recurrent kernel, which activates the raw beta logit
+        # itself with no cap: for exact erase the logit is clamped where it is
+        # produced so every path erases with at most 2 - 2^-6, as training does
+        # (FlashSDA's sglang_beta_cap on CUDA). Prefill output is unchanged by the
+        # clamp: its kernel caps beta itself.
+        self._sda_beta_logit_cap = None
+        if is_hip() and getattr(config, "linear_attn", None) == "sda":
+            from sglang.srt.layers.attention.solar_open3.amd import (
+                SdaRocmPrefill,
+                beta_logit_cap,
+            )
+
+            groups = getattr(config, "sda_decay_groups", None)
+            if not groups:
+                raise ValueError(
+                    "solar_open3 SDA (ROCm): config.json has no `sda_decay_groups`; the "
+                    "ROCm kernel reads one gate lane per decay group and needs the count"
+                )
+            self.attn.sda_prefill = SdaRocmPrefill(
+                groups=int(groups), exact_erase=bool(config.exact_erase)
+            )
+            if config.exact_erase:
+                self._sda_beta_logit_cap = beta_logit_cap(float(self.attn.beta_scale))
+
+    def _cap_beta_logit(self, states):
+        if self._sda_beta_logit_cap is None:
+            return states
+        qkv, beta, forget_gate, norm_gate = states
+        return qkv, beta.float().clamp(max=self._sda_beta_logit_cap), forget_gate, norm_gate
+
+    def forward_qkvbfg(self, hidden_states):
+        return self._cap_beta_logit(super().forward_qkvbfg(hidden_states))
+
+    def forward_qkvbfg_fused(self, hidden_states):
+        return self._cap_beta_logit(super().forward_qkvbfg_fused(hidden_states))
 
     def prepare_fused_decode(self):
         # The ROCm Open2 kernel does not implement Open3's SDA erase/rounding
@@ -2360,8 +2398,11 @@ class SolarOpen3Model(nn.Module):
         # Logged for the same reason: nothing else in the boot log says which SDA erase is served.
         logger.info(
             "[solar_open3] exact_erase=%s (SDA erase from config.json; served by the "
-            "FlashSDA plugin, checked in post_load_weights)",
+            "%s, checked in post_load_weights)",
             config.exact_erase,
+            "aiter flash_sda kernel (layers/attention/solar_open3/amd)"
+            if is_hip() and getattr(config, "linear_attn", None) == "sda"
+            else "FlashSDA plugin",
         )
         self.use_cp_attn_res = (
             self.use_attn_res and getattr(config, "attn_res_scorer", "static") == "cp"
@@ -2904,6 +2945,19 @@ class SolarOpen3ForCausalLM(SolarOpen2ForCausalLM):
         and the CP AttnRes fold inside ``load_weights``) and the end of the first ``load_weights``
         for every other model -- SGLang's ``DefaultModelLoader`` calls only ``load_weights``."""
         if not self.config.exact_erase:
+            return
+        if is_hip() and getattr(self.config, "linear_attn", None) == "sda":
+            # Every SDA layer carries aiter's exact-erase prefill on ROCm; it has to exist.
+            try:
+                from aiter.ops.triton._triton_kernels.chunk_delta_attn.flash_sda import (  # noqa: F401
+                    flash_sda_fwd,
+                )
+            except ImportError as err:
+                raise RuntimeError(
+                    "config.exact_erase=True needs aiter's flash_sda kernel on ROCm "
+                    "(aiter.ops.triton._triton_kernels.chunk_delta_attn.flash_sda), but it "
+                    "is not importable in this worker; install an aiter that provides it"
+                ) from err
             return
         try:
             from flash_sda.integrations import sglang_kernel
